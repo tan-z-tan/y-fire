@@ -5,6 +5,7 @@ import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 import * as awarenessProtocol from "y-protocols/awareness";
 import { WebRtc } from "./webrtc";
+import { StorageProvider, StorageConfig } from "./storage";
 export interface Parameters {
     firebaseApp: FirebaseApp;
     ydoc: Y.Doc;
@@ -13,6 +14,13 @@ export interface Parameters {
     maxUpdatesThreshold?: number;
     maxWaitTime?: number;
     maxWaitFirestoreTime?: number;
+    /**
+     * Storage configuration for Y.js state persistence.
+     * - "firestore": Store directly in Firestore (default, good for small docs)
+     * - "gcs": Store in Google Cloud Storage via Firebase Storage
+     * - "hybrid": Auto-select based on data size
+     */
+    storage?: Partial<StorageConfig>;
 }
 interface PeersRTC {
     receivers: {
@@ -45,6 +53,9 @@ export declare class FireProvider extends ObservableV2<any> {
     peersSenders: Set<string>;
     peersRTC: PeersRTC;
     documentMapper: (bytes: Bytes) => object;
+    storageProvider: StorageProvider | null;
+    storageConfig: StorageConfig;
+    private unsubscribeStorage?;
     cache: Uint8Array | null;
     maxCacheUpdates: number;
     cacheUpdateCount: number;
@@ -93,7 +104,8 @@ export declare class FireProvider extends ObservableV2<any> {
     consoleHandler: (message: any, data?: any) => void;
     destroy: () => void;
     kill: (keepReadOnly?: boolean) => void;
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, }: Parameters);
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, storage, }: Parameters);
+    private initializeStorageProvider;
 }
 export {};
 //# sourceMappingURL=provider.d.ts.map

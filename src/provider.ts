@@ -16,6 +16,14 @@ import { get as getLocal, set as setLocal, del as delLocal } from "idb-keyval";
 import { deleteInstance, initiateInstance, refreshPeers } from "./utils";
 import { WebRtc } from "./webrtc";
 import { createGraph } from "./graph";
+import {
+  StorageProvider,
+  StorageConfig,
+  DEFAULT_STORAGE_CONFIG,
+} from "./storage";
+import { FirestoreStorage } from "./storage/firestore-storage";
+import { GcsStorage } from "./storage/gcs-storage";
+import { HybridStorage } from "./storage/hybrid-storage";
 
 export interface Parameters {
   firebaseApp: FirebaseApp;
@@ -25,6 +33,13 @@ export interface Parameters {
   maxUpdatesThreshold?: number;
   maxWaitTime?: number;
   maxWaitFirestoreTime?: number;
+  /**
+   * Storage configuration for Y.js state persistence.
+   * - "firestore": Store directly in Firestore (default, good for small docs)
+   * - "gcs": Store in Google Cloud Storage via Firebase Storage
+   * - "hybrid": Auto-select based on data size
+   */
+  storage?: Partial<StorageConfig>;
 }
 
 interface PeersRTC {
@@ -65,6 +80,10 @@ export class FireProvider extends ObservableV2<any> {
   };
 
   documentMapper: (bytes: Bytes) => object = (bytes) => ({ content: bytes });
+
+  storageProvider: StorageProvider | null = null;
+  storageConfig: StorageConfig;
+  private unsubscribeStorage?: () => void;
 
   cache: Uint8Array | null;
   maxCacheUpdates: number = 20;
@@ -147,32 +166,52 @@ export class FireProvider extends ObservableV2<any> {
     // pull the changes and merge them to the current
     // yjs document
     if (this.unsubscribeData) this.unsubscribeData();
-    this.unsubscribeData = onSnapshot(
-      doc(this.db, this.documentPath),
-      (doc) => {
-        if (doc.exists()) {
-          const data = doc.data();
-          if (data && data.content) {
-            this.firebaseDataLastUpdatedAt = new Date().getTime();
-            const content = data.content.toUint8Array();
-            const origin = "origin:firebase/update"; // make sure this does not coincide with UID
-            Y.applyUpdate(this.doc, content, origin);
+    if (this.unsubscribeStorage) this.unsubscribeStorage();
+
+    // Use storage provider if configured (GCS or hybrid)
+    if (this.storageProvider) {
+      this.unsubscribeStorage = this.storageProvider.subscribe((content) => {
+        if (content) {
+          this.firebaseDataLastUpdatedAt = new Date().getTime();
+          const origin = "origin:firebase/update"; // make sure this does not coincide with UID
+          Y.applyUpdate(this.doc, content, origin);
+        }
+        if (!this.ready) {
+          if (this.onReady) {
+            this.onReady();
+            this.ready = true;
           }
-          if (!this.ready) {
-            if (this.onReady) {
-              this.onReady();
-              this.ready = true;
+        }
+      });
+    } else {
+      // Default: Use Firestore directly
+      this.unsubscribeData = onSnapshot(
+        doc(this.db, this.documentPath),
+        (docSnapshot) => {
+          if (docSnapshot.exists()) {
+            const data = docSnapshot.data();
+            if (data && data.content) {
+              this.firebaseDataLastUpdatedAt = new Date().getTime();
+              const content = data.content.toUint8Array();
+              const origin = "origin:firebase/update"; // make sure this does not coincide with UID
+              Y.applyUpdate(this.doc, content, origin);
+            }
+            if (!this.ready) {
+              if (this.onReady) {
+                this.onReady();
+                this.ready = true;
+              }
             }
           }
+        },
+        (error) => {
+          this.consoleHandler("Firestore sync error", error);
+          if (error.code === "permission-denied") {
+            if (this.onDeleted) this.onDeleted();
+          }
         }
-      },
-      (error) => {
-        this.consoleHandler("Firestore sync error", error);
-        if (error.code === "permission-denied") {
-          if (this.onDeleted) this.onDeleted();
-        }
-      }
-    );
+      );
+    }
   };
 
   trackMesh = () => {
@@ -309,18 +348,23 @@ export class FireProvider extends ObservableV2<any> {
 
   saveToFirestore = async () => {
     try {
-      // current document to firestore
-      const ref = doc(this.db, this.documentPath);
-      await setDoc(
-        ref,
-        this.documentMapper(
-          Bytes.fromUint8Array(Y.encodeStateAsUpdate(this.doc))
-        ),
-        { merge: true }
-      );
-      this.deleteLocal(); // We have successfully saved to Firestore, empty indexedDb for now
+      const encodedState = Y.encodeStateAsUpdate(this.doc);
+
+      // Use storage provider if configured (GCS or hybrid)
+      if (this.storageProvider) {
+        await this.storageProvider.save(encodedState);
+      } else {
+        // Default: Save to Firestore directly
+        const ref = doc(this.db, this.documentPath);
+        await setDoc(
+          ref,
+          this.documentMapper(Bytes.fromUint8Array(encodedState)),
+          { merge: true }
+        );
+      }
+      this.deleteLocal(); // We have successfully saved, empty indexedDb for now
     } catch (error) {
-      this.consoleHandler("error saving to firestore", error);
+      this.consoleHandler("error saving to storage", error);
     } finally {
       if (this.onSaving) this.onSaving(false);
     }
@@ -462,6 +506,13 @@ export class FireProvider extends ObservableV2<any> {
       this.unsubscribeData();
       delete this.unsubscribeData;
     }
+    if (this.unsubscribeStorage && !keepReadOnly) {
+      this.unsubscribeStorage();
+      delete this.unsubscribeStorage;
+    }
+    if (this.storageProvider) {
+      this.storageProvider.destroy();
+    }
     if (this.unsubscribeMesh) {
       this.unsubscribeMesh();
       delete this.unsubscribeMesh;
@@ -490,6 +541,7 @@ export class FireProvider extends ObservableV2<any> {
     maxUpdatesThreshold,
     maxWaitTime,
     maxWaitFirestoreTime,
+    storage,
   }: Parameters) {
     super();
 
@@ -504,7 +556,43 @@ export class FireProvider extends ObservableV2<any> {
     if (maxWaitFirestoreTime) this.maxFirestoreWait = maxWaitFirestoreTime;
     this.awareness = new awarenessProtocol.Awareness(this.doc);
 
+    // Initialize storage configuration
+    this.storageConfig = {
+      ...DEFAULT_STORAGE_CONFIG,
+      ...storage,
+    };
+
+    // Create storage provider based on configuration
+    this.initializeStorageProvider();
+
     // Initialize the provider
     const init = this.init();
+  }
+
+  private initializeStorageProvider(): void {
+    switch (this.storageConfig.type) {
+      case "gcs":
+        this.storageProvider = new GcsStorage({
+          firebaseApp: this.firebaseApp,
+          documentPath: this.documentPath,
+          gcsPath: this.storageConfig.gcsPath,
+        });
+        break;
+      case "hybrid":
+        this.storageProvider = new HybridStorage({
+          firebaseApp: this.firebaseApp,
+          documentPath: this.documentPath,
+          docMapper: this.documentMapper,
+          hybridThreshold: this.storageConfig.hybridThreshold,
+          gcsPath: this.storageConfig.gcsPath,
+        });
+        break;
+      case "firestore":
+      default:
+        // For firestore, we use the existing trackData mechanism
+        // No separate storage provider needed
+        this.storageProvider = null;
+        break;
+    }
   }
 }
