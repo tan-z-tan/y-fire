@@ -7,7 +7,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-import { getFirestore, onSnapshot, doc, setDoc, Bytes, } from "@firebase/firestore";
+import { getFirestore, onSnapshot, doc, setDoc, getDocs, Bytes, serverTimestamp, } from "@firebase/firestore";
 import { collection } from "firebase/firestore";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
@@ -16,6 +16,7 @@ import { get as getLocal, set as setLocal, del as delLocal } from "idb-keyval";
 import { deleteInstance, initiateInstance, refreshPeers } from "./utils";
 import { WebRtc } from "./webrtc";
 import { createGraph } from "./graph";
+const MAX_SIZE = 800000; // 800KB safety limit (Firestore limit is 1MB)
 /**
  * FireProvider class that handles firestore data sync and awareness
  * based on webRTC.
@@ -30,7 +31,7 @@ export class FireProvider extends ObservableV2 {
     get clientTimeOffset() {
         return this.timeOffset;
     }
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, }) {
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, }) {
         super();
         this.timeOffset = 0; // offset to server time in mili seconds
         this.clients = [];
@@ -45,6 +46,7 @@ export class FireProvider extends ObservableV2 {
         this.cacheUpdateCount = 0;
         this.maxRTCWait = 100;
         this.maxFirestoreWait = 3000;
+        this.chunkThreshold = MAX_SIZE;
         this.firebaseDataLastUpdatedAt = new Date().getTime();
         this.instanceConnection = new ObservableV2();
         this.ready = false;
@@ -105,14 +107,44 @@ export class FireProvider extends ObservableV2 {
             // yjs document
             if (this.unsubscribeData)
                 this.unsubscribeData();
-            this.unsubscribeData = onSnapshot(doc(this.db, this.documentPath), (doc) => {
-                if (doc.exists()) {
-                    const data = doc.data();
-                    if (data && data.content) {
+            this.unsubscribeData = onSnapshot(doc(this.db, this.documentPath), (docSnapshot) => __awaiter(this, void 0, void 0, function* () {
+                if (docSnapshot.exists()) {
+                    const data = docSnapshot.data();
+                    if (data) {
                         this.firebaseDataLastUpdatedAt = new Date().getTime();
-                        const content = data.content.toUint8Array();
-                        const origin = "origin:firebase/update"; // make sure this does not coincide with UID
-                        Y.applyUpdate(this.doc, content, origin);
+                        let content;
+                        // Default Firestore behavior
+                        if (data.chunked) {
+                            // Handle chunked data
+                            try {
+                                const chunksCollectionRef = collection(this.db, this.documentPath, "yfire_chunks");
+                                const chunksSnapshot = yield getDocs(chunksCollectionRef);
+                                const chunks = chunksSnapshot.docs
+                                    .map((doc) => ({
+                                    index: parseInt(doc.id),
+                                    content: doc.data().content.toUint8Array(),
+                                }))
+                                    .sort((a, b) => a.index - b.index);
+                                // Concatenate chunks
+                                const totalLength = chunks.reduce((acc, chunk) => acc + chunk.content.length, 0);
+                                content = new Uint8Array(totalLength);
+                                let offset = 0;
+                                for (const chunk of chunks) {
+                                    content.set(chunk.content, offset);
+                                    offset += chunk.content.length;
+                                }
+                            }
+                            catch (error) {
+                                this.consoleHandler("Error fetching chunks", error);
+                            }
+                        }
+                        else if (data.content) {
+                            content = data.content.toUint8Array();
+                        }
+                        if (content) {
+                            const origin = "origin:firebase/update"; // make sure this does not coincide with UID
+                            Y.applyUpdate(this.doc, content, origin);
+                        }
                     }
                     if (!this.ready) {
                         if (this.onReady) {
@@ -121,7 +153,7 @@ export class FireProvider extends ObservableV2 {
                         }
                     }
                 }
-            }, (error) => {
+            }), (error) => {
                 this.consoleHandler("Firestore sync error", error);
                 if (error.code === "permission-denied") {
                     if (this.onDeleted)
@@ -238,7 +270,36 @@ export class FireProvider extends ObservableV2 {
             try {
                 // current document to firestore
                 const ref = doc(this.db, this.documentPath);
-                yield setDoc(ref, this.documentMapper(Bytes.fromUint8Array(Y.encodeStateAsUpdate(this.doc))), { merge: true });
+                const content = Y.encodeStateAsUpdate(this.doc);
+                if (content.length > this.chunkThreshold) {
+                    // Chunking required
+                    const chunkCount = Math.ceil(content.length / this.chunkThreshold);
+                    const chunksCollectionRef = collection(this.db, this.documentPath, "yfire_chunks");
+                    // Write chunks
+                    const promises = [];
+                    for (let i = 0; i < chunkCount; i++) {
+                        const start = i * this.chunkThreshold;
+                        const end = start + this.chunkThreshold;
+                        const chunk = content.slice(start, end);
+                        const chunkRef = doc(chunksCollectionRef, i.toString());
+                        promises.push(setDoc(chunkRef, {
+                            content: Bytes.fromUint8Array(chunk),
+                            index: i,
+                        }));
+                    }
+                    yield Promise.all(promises);
+                    // Update main document
+                    yield setDoc(ref, {
+                        chunked: true,
+                        chunkCount: chunkCount,
+                        updatedAt: serverTimestamp(),
+                        content: null, // Clear main content
+                    }, { merge: true });
+                }
+                else {
+                    // No chunking needed
+                    yield setDoc(ref, this.documentMapper(Bytes.fromUint8Array(content)), { merge: true });
+                }
                 this.deleteLocal(); // We have successfully saved to Firestore, empty indexedDb for now
             }
             catch (error) {
@@ -391,6 +452,8 @@ export class FireProvider extends ObservableV2 {
             this.maxRTCWait = maxWaitTime;
         if (maxWaitFirestoreTime)
             this.maxFirestoreWait = maxWaitFirestoreTime;
+        if (chunkThreshold)
+            this.chunkThreshold = chunkThreshold;
         this.awareness = new awarenessProtocol.Awareness(this.doc);
         // Initialize the provider
         const init = this.init();
