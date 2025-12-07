@@ -13,6 +13,7 @@ export interface Parameters {
     maxUpdatesThreshold?: number;
     maxWaitTime?: number;
     maxWaitFirestoreTime?: number;
+    chunkThreshold?: number;
 }
 interface PeersRTC {
     receivers: {
@@ -52,6 +53,7 @@ export declare class FireProvider extends ObservableV2<any> {
     maxRTCWait: number;
     firestoreTimeout: string | number | NodeJS.Timeout;
     maxFirestoreWait: number;
+    chunkThreshold: number;
     firebaseDataLastUpdatedAt: number;
     instanceConnection: ObservableV2<any>;
     recreateTimeout: string | number | NodeJS.Timeout;
@@ -67,6 +69,7 @@ export declare class FireProvider extends ObservableV2<any> {
     saveToLocal: () => Promise<void>;
     deleteLocal: () => Promise<void>;
     initiateHandler: () => void;
+    saveToFirestore: () => Promise<void>;
     trackData: () => void;
     trackMesh: () => void;
     reconnect: () => void;
@@ -77,7 +80,6 @@ export declare class FireProvider extends ObservableV2<any> {
         message: unknown;
         data: Uint8Array | null;
     }) => void;
-    saveToFirestore: () => Promise<void>;
     sendToFirestoreQueue: () => void;
     sendCache: (from: string) => void;
     sendToQueue: ({ from, update }: {
@@ -93,7 +95,7 @@ export declare class FireProvider extends ObservableV2<any> {
     consoleHandler: (message: any, data?: any) => void;
     destroy: () => void;
     kill: (keepReadOnly?: boolean) => void;
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, }: Parameters);
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, }: Parameters);
 }
 export {};
 //# sourceMappingURL=provider.d.ts.map
