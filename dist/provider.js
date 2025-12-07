@@ -101,50 +101,6 @@ export class FireProvider extends ObservableV2 {
             this.doc.on("update", this.updateHandler);
             this.syncLocal(); // if there's any data in indexedDb, get and apply
         };
-        this.saveToFirestore = () => __awaiter(this, void 0, void 0, function* () {
-            try {
-                // current document to firestore
-                const ref = doc(this.db, this.documentPath);
-                const content = Y.encodeStateAsUpdate(this.doc);
-                if (content.length > this.chunkThreshold) {
-                    // Chunking required
-                    const chunkCount = Math.ceil(content.length / this.chunkThreshold);
-                    const chunksCollectionRef = collection(this.db, this.documentPath, "yfire_chunks");
-                    // Write chunks
-                    const promises = [];
-                    for (let i = 0; i < chunkCount; i++) {
-                        const start = i * this.chunkThreshold;
-                        const end = start + this.chunkThreshold;
-                        const chunk = content.slice(start, end);
-                        const chunkRef = doc(chunksCollectionRef, i.toString());
-                        promises.push(setDoc(chunkRef, {
-                            content: Bytes.fromUint8Array(chunk),
-                            index: i,
-                        }));
-                    }
-                    yield Promise.all(promises);
-                    // Update main document
-                    yield setDoc(ref, {
-                        chunked: true,
-                        chunkCount: chunkCount,
-                        updatedAt: serverTimestamp(),
-                        content: null, // Clear main content
-                    }, { merge: true });
-                }
-                else {
-                    // No chunking needed
-                    yield setDoc(ref, this.documentMapper(Bytes.fromUint8Array(content)), { merge: true });
-                }
-                this.deleteLocal(); // We have successfully saved to Firestore, empty indexedDb for now
-            }
-            catch (error) {
-                this.consoleHandler("error saving to firestore", error);
-            }
-            finally {
-                if (this.onSaving)
-                    this.onSaving(false);
-            }
-        });
         this.trackData = () => {
             // Whenever there are changes to the firebase document
             // pull the changes and merge them to the current
@@ -310,6 +266,50 @@ export class FireProvider extends ObservableV2 {
                 }
             }
         };
+        this.saveToFirestore = () => __awaiter(this, void 0, void 0, function* () {
+            try {
+                // current document to firestore
+                const ref = doc(this.db, this.documentPath);
+                const content = Y.encodeStateAsUpdate(this.doc);
+                if (content.length > this.chunkThreshold) {
+                    // Chunking required
+                    const chunkCount = Math.ceil(content.length / this.chunkThreshold);
+                    const chunksCollectionRef = collection(this.db, this.documentPath, "yfire_chunks");
+                    // Write chunks
+                    const promises = [];
+                    for (let i = 0; i < chunkCount; i++) {
+                        const start = i * this.chunkThreshold;
+                        const end = start + this.chunkThreshold;
+                        const chunk = content.slice(start, end);
+                        const chunkRef = doc(chunksCollectionRef, i.toString());
+                        promises.push(setDoc(chunkRef, {
+                            content: Bytes.fromUint8Array(chunk),
+                            index: i,
+                        }));
+                    }
+                    yield Promise.all(promises);
+                    // Update main document
+                    yield setDoc(ref, {
+                        chunked: true,
+                        chunkCount: chunkCount,
+                        updatedAt: serverTimestamp(),
+                        content: null, // Clear main content
+                    }, { merge: true });
+                }
+                else {
+                    // No chunking needed
+                    yield setDoc(ref, this.documentMapper(Bytes.fromUint8Array(content)), { merge: true });
+                }
+                this.deleteLocal(); // We have successfully saved to Firestore, empty indexedDb for now
+            }
+            catch (error) {
+                this.consoleHandler("error saving to firestore", error);
+            }
+            finally {
+                if (this.onSaving)
+                    this.onSaving(false);
+            }
+        });
         this.sendToFirestoreQueue = () => {
             // if cache settles down, save document to firebase
             if (this.firestoreTimeout)

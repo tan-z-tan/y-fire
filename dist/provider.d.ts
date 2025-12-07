@@ -69,7 +69,6 @@ export declare class FireProvider extends ObservableV2<any> {
     saveToLocal: () => Promise<void>;
     deleteLocal: () => Promise<void>;
     initiateHandler: () => void;
-    saveToFirestore: () => Promise<void>;
     trackData: () => void;
     trackMesh: () => void;
     reconnect: () => void;
@@ -80,6 +79,7 @@ export declare class FireProvider extends ObservableV2<any> {
         message: unknown;
         data: Uint8Array | null;
     }) => void;
+    saveToFirestore: () => Promise<void>;
     sendToFirestoreQueue: () => void;
     sendCache: (from: string) => void;
     sendToQueue: ({ from, update }: {
