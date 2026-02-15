@@ -32,6 +32,7 @@ interface Parameters {
   uid: string;
   peerUid: string;
   isCaller: boolean;
+  encodingVersion?: 1 | 2;
 }
 
 interface Object {
@@ -59,6 +60,7 @@ export class WebRtc extends ObservableV2<any> {
   connection: string = "connecting";
   clock: string | number | NodeJS.Timeout;
   idleThreshold: number = 20000;
+  encodingVersion: 1 | 2 = 1;
 
   constructor({
     firebaseApp,
@@ -69,6 +71,7 @@ export class WebRtc extends ObservableV2<any> {
     uid,
     peerUid,
     isCaller = false,
+    encodingVersion,
   }: Parameters) {
     super();
     this.doc = ydoc;
@@ -79,6 +82,7 @@ export class WebRtc extends ObservableV2<any> {
     this.peerUid = peerUid;
     this.db = getFirestore(firebaseApp);
     this.isCaller = isCaller;
+    if (encodingVersion) this.encodingVersion = encodingVersion;
     /**
      * Let's initiate this peer. The peer
      * is NOT a caller unless specified
@@ -300,7 +304,11 @@ export class WebRtc extends ObservableV2<any> {
           );
         } else if (!decrypted.message && decrypted.data) {
           // this.consoleHandler("decrypted data", decrypted);
-          Y.applyUpdate(this.doc, decrypted.data, decrypted.uid);
+          if (this.encodingVersion === 2) {
+            Y.applyUpdateV2(this.doc, decrypted.data, decrypted.uid);
+          } else {
+            Y.applyUpdate(this.doc, decrypted.data, decrypted.uid);
+          }
         }
       }
     } catch (error) {
