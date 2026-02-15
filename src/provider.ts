@@ -166,7 +166,7 @@ export class FireProvider extends ObservableV2<any> {
     // We will track the mesh document on Firestore to
     // keep track of selected peers
     this.trackMesh();
-    this.doc.on("update", this.updateHandler);
+    this.doc.on(this.encodingVersion === 2 ? "updateV2" : "update", this.updateHandler);
     this.syncLocal(); // if there's any data in indexedDb, get and apply
   };
 
@@ -561,7 +561,7 @@ export class FireProvider extends ObservableV2<any> {
     if (this.recreateTimeout) clearTimeout(this.recreateTimeout);
     if (this.cacheTimeout) clearTimeout(this.cacheTimeout);
     if (this.firestoreTimeout) clearTimeout(this.firestoreTimeout);
-    this.doc.off("update", this.updateHandler);
+    this.doc.off(this.encodingVersion === 2 ? "updateV2" : "update", this.updateHandler);
     this.awareness.off("update", this.awarenessUpdateHandler);
     deleteInstance(this.db, this.documentPath, this.uid);
     if (this.unsubscribeData && !keepReadOnly) {
