@@ -14,7 +14,7 @@ import { ObservableV2 } from "lib0/observable";
 import SimplePeer from "simple-peer-light";
 import { Uint8ArrayToBase64, base64ToUint8Array, decryptData, encryptData, generateKey, killZombie, } from "./utils";
 export class WebRtc extends ObservableV2 {
-    constructor({ firebaseApp, ydoc, awareness, instanceConnection, documentPath, uid, peerUid, isCaller = false, }) {
+    constructor({ firebaseApp, ydoc, awareness, instanceConnection, documentPath, uid, peerUid, isCaller = false, encodingVersion, }) {
         super();
         this.ice = {
             iceServers: [
@@ -24,6 +24,7 @@ export class WebRtc extends ObservableV2 {
         };
         this.connection = "connecting";
         this.idleThreshold = 20000;
+        this.encodingVersion = 1;
         this.initPeer = () => {
             this.createKey();
             if (this.isCaller) {
@@ -189,7 +190,12 @@ export class WebRtc extends ObservableV2 {
                     }
                     else if (!decrypted.message && decrypted.data) {
                         // this.consoleHandler("decrypted data", decrypted);
-                        Y.applyUpdate(this.doc, decrypted.data, decrypted.uid);
+                        if (this.encodingVersion === 2) {
+                            Y.applyUpdateV2(this.doc, decrypted.data, decrypted.uid);
+                        }
+                        else {
+                            Y.applyUpdate(this.doc, decrypted.data, decrypted.uid);
+                        }
                     }
                 }
             }
@@ -211,6 +217,8 @@ export class WebRtc extends ObservableV2 {
         this.peerUid = peerUid;
         this.db = getFirestore(firebaseApp);
         this.isCaller = isCaller;
+        if (encodingVersion)
+            this.encodingVersion = encodingVersion;
         /**
          * Let's initiate this peer. The peer
          * is NOT a caller unless specified

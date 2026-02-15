@@ -14,6 +14,7 @@ export interface Parameters {
     maxWaitTime?: number;
     maxWaitFirestoreTime?: number;
     chunkThreshold?: number;
+    encodingVersion?: 1 | 2;
 }
 interface PeersRTC {
     receivers: {
@@ -54,6 +55,7 @@ export declare class FireProvider extends ObservableV2<any> {
     firestoreTimeout: string | number | NodeJS.Timeout;
     maxFirestoreWait: number;
     chunkThreshold: number;
+    encodingVersion: 1 | 2;
     firebaseDataLastUpdatedAt: number;
     instanceConnection: ObservableV2<any>;
     recreateTimeout: string | number | NodeJS.Timeout;
@@ -64,6 +66,9 @@ export declare class FireProvider extends ObservableV2<any> {
     onReady: () => void;
     onDeleted: () => void;
     onSaving: (status: boolean) => void;
+    private _encodeStateAsUpdate;
+    private _applyUpdate;
+    private _mergeUpdates;
     init: () => Promise<void>;
     syncLocal: () => Promise<void>;
     saveToLocal: () => Promise<void>;
@@ -95,7 +100,7 @@ export declare class FireProvider extends ObservableV2<any> {
     consoleHandler: (message: any, data?: any) => void;
     destroy: () => void;
     kill: (keepReadOnly?: boolean) => void;
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, }: Parameters);
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, encodingVersion, }: Parameters);
 }
 export {};
 //# sourceMappingURL=provider.d.ts.map

@@ -14,6 +14,7 @@ interface Parameters {
     uid: string;
     peerUid: string;
     isCaller: boolean;
+    encodingVersion?: 1 | 2;
 }
 export declare class WebRtc extends ObservableV2<any> {
     readonly doc: Y.Doc;
@@ -35,7 +36,8 @@ export declare class WebRtc extends ObservableV2<any> {
     connection: string;
     clock: string | number | NodeJS.Timeout;
     idleThreshold: number;
-    constructor({ firebaseApp, ydoc, awareness, instanceConnection, documentPath, uid, peerUid, isCaller, }: Parameters);
+    encodingVersion: 1 | 2;
+    constructor({ firebaseApp, ydoc, awareness, instanceConnection, documentPath, uid, peerUid, isCaller, encodingVersion, }: Parameters);
     initPeer: () => void;
     startInitClock: () => void;
     createKey: () => Promise<void>;

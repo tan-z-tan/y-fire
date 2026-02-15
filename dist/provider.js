@@ -31,7 +31,25 @@ export class FireProvider extends ObservableV2 {
     get clientTimeOffset() {
         return this.timeOffset;
     }
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, }) {
+    _encodeStateAsUpdate() {
+        return this.encodingVersion === 2
+            ? Y.encodeStateAsUpdateV2(this.doc)
+            : Y.encodeStateAsUpdate(this.doc);
+    }
+    _applyUpdate(update, origin) {
+        if (this.encodingVersion === 2) {
+            Y.applyUpdateV2(this.doc, update, origin);
+        }
+        else {
+            Y.applyUpdate(this.doc, update, origin);
+        }
+    }
+    _mergeUpdates(updates) {
+        return this.encodingVersion === 2
+            ? Y.mergeUpdatesV2(updates)
+            : Y.mergeUpdates(updates);
+    }
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, encodingVersion, }) {
         super();
         this.timeOffset = 0; // offset to server time in mili seconds
         this.clients = [];
@@ -47,6 +65,7 @@ export class FireProvider extends ObservableV2 {
         this.maxRTCWait = 100;
         this.maxFirestoreWait = 3000;
         this.chunkThreshold = MAX_SIZE;
+        this.encodingVersion = 1;
         this.firebaseDataLastUpdatedAt = new Date().getTime();
         this.instanceConnection = new ObservableV2();
         this.ready = false;
@@ -69,7 +88,7 @@ export class FireProvider extends ObservableV2 {
             try {
                 const local = yield getLocal(this.documentPath);
                 if (local)
-                    Y.applyUpdate(this.doc, local, { key: "local-sync" });
+                    this._applyUpdate(local, { key: "local-sync" });
             }
             catch (e) {
                 this.consoleHandler("get local error", e);
@@ -77,7 +96,7 @@ export class FireProvider extends ObservableV2 {
         });
         this.saveToLocal = () => __awaiter(this, void 0, void 0, function* () {
             try {
-                const currentDoc = Y.encodeStateAsUpdate(this.doc);
+                const currentDoc = this._encodeStateAsUpdate();
                 setLocal(this.documentPath, currentDoc);
             }
             catch (e) {
@@ -143,7 +162,7 @@ export class FireProvider extends ObservableV2 {
                         }
                         if (content) {
                             const origin = "origin:firebase/update"; // make sure this does not coincide with UID
-                            Y.applyUpdate(this.doc, content, origin);
+                            this._applyUpdate(content, origin);
                         }
                     }
                     if (!this.ready) {
@@ -241,6 +260,7 @@ export class FireProvider extends ObservableV2 {
                         uid: this.uid,
                         peerUid,
                         isCaller,
+                        encodingVersion: this.encodingVersion,
                     });
                 }));
             }
@@ -270,7 +290,7 @@ export class FireProvider extends ObservableV2 {
             try {
                 // current document to firestore
                 const ref = doc(this.db, this.documentPath);
-                const content = Y.encodeStateAsUpdate(this.doc);
+                const content = this._encodeStateAsUpdate();
                 if (content.length > this.chunkThreshold) {
                     // Chunking required
                     const chunkCount = Math.ceil(content.length / this.chunkThreshold);
@@ -342,7 +362,7 @@ export class FireProvider extends ObservableV2 {
                 // this update was from this user
                 if (this.cacheTimeout)
                     clearTimeout(this.cacheTimeout);
-                this.cache = this.cache ? Y.mergeUpdates([this.cache, update]) : update;
+                this.cache = this.cache ? this._mergeUpdates([this.cache, update]) : update;
                 this.cacheUpdateCount++;
                 if (this.cacheUpdateCount >= this.maxCacheUpdates) {
                     // if the cache was already merged 20 times (this.maxCacheUpdates), send
@@ -377,7 +397,7 @@ export class FireProvider extends ObservableV2 {
             if (origin !== this.uid) {
                 // We will not allow no. 5. to propagate any further
                 // Apply updates received from no. 1 to 4. -> triggers no. 5
-                Y.applyUpdate(this.doc, update, this.uid); // the third parameter sets the transaction-origin
+                this._applyUpdate(update, this.uid); // the third parameter sets the transaction-origin
                 // Convert no. 1 and 2 to uid, because we want these to eventually trigger 'save' to Firestore
                 // sendToQueue method will either:
                 // 1. save origin:uid to Firestore (and send to peers through WebRtc)
@@ -454,6 +474,8 @@ export class FireProvider extends ObservableV2 {
             this.maxFirestoreWait = maxWaitFirestoreTime;
         if (chunkThreshold)
             this.chunkThreshold = chunkThreshold;
+        if (encodingVersion)
+            this.encodingVersion = encodingVersion;
         this.awareness = new awarenessProtocol.Awareness(this.doc);
         // Initialize the provider
         const init = this.init();
