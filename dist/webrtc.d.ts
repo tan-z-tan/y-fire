@@ -1,4 +1,3 @@
-/// <reference types="node" />
 import * as Y from "yjs";
 import * as awarenessProtocol from "y-protocols/awareness";
 import { FirebaseApp } from "@firebase/app";

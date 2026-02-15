@@ -1,4 +1,3 @@
-/// <reference types="node" />
 import { FirebaseApp } from "@firebase/app";
 import { Firestore, Bytes } from "@firebase/firestore";
 import * as Y from "yjs";

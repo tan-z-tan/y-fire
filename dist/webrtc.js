@@ -166,7 +166,7 @@ export class WebRtc extends ObservableV2 {
             this.instanceConnection.emit("closed", [true]);
             this.destroy();
         };
-        this.sendData = ({ message, data, }) => __awaiter(this, void 0, void 0, function* () {
+        this.sendData = (_a) => __awaiter(this, [_a], void 0, function* ({ message, data, }) {
             const msg = {};
             msg.uid = this.uid;
             if (message)

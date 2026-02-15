@@ -1,1 +1,1 @@
-{"version":3,"file":"graph.d.ts","sourceRoot":"","sources":["../src/graph.ts"],"names":[],"mappings":"AAAA;;;;;;;;;GASG;AACH,eAAO,MAAM,WAAW,UAAU,MAAM,EAAE,gBAAoB,MAAM;;CAWnE,CAAC"}
+{"version":3,"file":"graph.d.ts","sourceRoot":"","sources":["../src/graph.ts"],"names":[],"mappings":"AAAA;;;;;;;;;GASG;AACH,eAAO,MAAM,WAAW,GAAI,OAAM,MAAM,EAAO,EAAE,cAAa,MAAU;;CAWvE,CAAC"}
