@@ -33,10 +33,24 @@ interface Parameters {
   peerUid: string;
   isCaller: boolean;
   encodingVersion?: 1 | 2;
+  iceServers?: RTCIceServer[];
 }
 
 interface Object {
   [key: string]: any;
+}
+
+export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+
+/** Emitted on instanceConnection as "link-error" when a peer link dies with an error. */
+export interface LinkError {
+  peerUid: string;
+  isCaller: boolean;
+  /** simple-peer error code, e.g. ERR_ICE_CONNECTION_FAILURE */
+  code: string;
 }
 
 export class WebRtc extends ObservableV2<any> {
@@ -50,14 +64,11 @@ export class WebRtc extends ObservableV2<any> {
   readonly db: Firestore;
   private unsubscribeHandshake?: Unsubscribe;
   isCaller: boolean;
-  ice = {
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-    ],
-  };
+  ice: { iceServers: RTCIceServer[] } = { iceServers: DEFAULT_ICE_SERVERS };
   peerKey: CryptoKey;
   connection: string = "connecting";
+  /** Set when the link was closed by an error (simple-peer error code). */
+  closeReason?: string;
   clock: string | number | NodeJS.Timeout;
   idleThreshold: number = 20000;
   encodingVersion: 1 | 2 = 1;
@@ -72,6 +83,7 @@ export class WebRtc extends ObservableV2<any> {
     peerUid,
     isCaller = false,
     encodingVersion,
+    iceServers,
   }: Parameters) {
     super();
     this.doc = ydoc;
@@ -83,6 +95,7 @@ export class WebRtc extends ObservableV2<any> {
     this.db = getFirestore(firebaseApp);
     this.isCaller = isCaller;
     if (encodingVersion) this.encodingVersion = encodingVersion;
+    if (iceServers && iceServers.length) this.ice = { iceServers };
     /**
      * Let's initiate this peer. The peer
      * is NOT a caller unless specified
@@ -101,6 +114,10 @@ export class WebRtc extends ObservableV2<any> {
     this.peer.on("data", this.handleReceivingData);
     this.handshake();
     this.peer.on("connect", this.handleOnConnected);
+    // simple-peer emits "error" right before "close" when the link dies
+    // (ICE failure etc.). Surface the code so the provider can tell a
+    // definitive ICE failure apart from a zombie peer that never answered.
+    this.peer.on("error", this.handleOnError);
     this.peer.on("close", this.handleOnClose);
 
     this.startInitClock();
@@ -133,7 +150,7 @@ export class WebRtc extends ObservableV2<any> {
 
   createPeer = (config: {
     initiator: boolean;
-    config: { iceServers: { urls: string }[] };
+    config: { iceServers: RTCIceServer[] };
     trickle: boolean;
     channelName?: string;
   }) => {
@@ -263,6 +280,13 @@ export class WebRtc extends ObservableV2<any> {
     // this.consoleHandler("Peer connected");
     this.connection = "connected";
     this.sendData({ message: "Hey!", data: null });
+  };
+
+  handleOnError = (error: { code?: string; message?: string } | null) => {
+    const code = (error && error.code) || "ERR_UNKNOWN";
+    this.closeReason = code;
+    const info: LinkError = { peerUid: this.peerUid, isCaller: this.isCaller, code };
+    this.instanceConnection.emit("link-error", [info]);
   };
 
   handleOnClose = () => {

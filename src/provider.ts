@@ -16,7 +16,7 @@ import { ObservableV2 } from "lib0/observable";
 import * as awarenessProtocol from "y-protocols/awareness";
 import { get as getLocal, set as setLocal, del as delLocal } from "idb-keyval";
 import { deleteInstance, initiateInstance, refreshPeers } from "./utils";
-import { WebRtc } from "./webrtc";
+import { DEFAULT_ICE_SERVERS, WebRtc, type LinkError } from "./webrtc";
 import { createGraph } from "./graph";
 
 export interface Parameters {
@@ -29,6 +29,8 @@ export interface Parameters {
   maxWaitFirestoreTime?: number;
   chunkThreshold?: number;
   encodingVersion?: 1 | 2;
+  /** ICE servers for every peer link. Defaults to public Google STUN (no TURN). */
+  iceServers?: RTCIceServer[];
 }
 
 interface PeersRTC {
@@ -81,6 +83,14 @@ export class FireProvider extends ObservableV2<any> {
   maxFirestoreWait: number = 3000;
   chunkThreshold: number = MAX_SIZE;
   encodingVersion: 1 | 2 = 1;
+  iceServers: RTCIceServer[] = DEFAULT_ICE_SERVERS;
+  /**
+   * Links that died with ERR_ICE_CONNECTION_FAILURE, cumulative across
+   * reconnects. Unlike a zombie peer (which never answers), this is a
+   * definitive "signaling worked but no ICE path exists" signal.
+   */
+  iceFailures: number = 0;
+  public onLinkError?: (error: LinkError) => void;
 
   firebaseDataLastUpdatedAt: number = new Date().getTime();
 
@@ -124,6 +134,7 @@ export class FireProvider extends ObservableV2<any> {
     try {
       const data = await initiateInstance(this.db, this.documentPath);
       this.instanceConnection.on("closed", this.trackConnections);
+      this.instanceConnection.on("link-error", this.handleLinkError);
       this.uid = data.uid;
       this.timeOffset = data.offset;
       this.initiateHandler();
@@ -275,6 +286,22 @@ export class FireProvider extends ObservableV2<any> {
     );
   };
 
+  handleLinkError = (error: LinkError) => {
+    if (error.code === "ERR_ICE_CONNECTION_FAILURE") this.iceFailures++;
+    if (this.onLinkError) this.onLinkError(error);
+  };
+
+  /**
+   * Replace the ICE servers used for peer links (e.g. add TURN once a
+   * STUN-only mesh has proven unreachable). Existing links keep their
+   * RTCPeerConnection config, so by default the mesh is rebuilt through
+   * reconnect(), which re-creates this instance and every link.
+   */
+  setIceServers = (iceServers: RTCIceServer[], reconnect: boolean = true) => {
+    this.iceServers = iceServers && iceServers.length ? iceServers : DEFAULT_ICE_SERVERS;
+    if (reconnect) this.reconnect();
+  };
+
   reconnect = () => {
     if (this.recreateTimeout) clearTimeout(this.recreateTimeout);
     this.recreateTimeout = setTimeout(async () => {
@@ -339,6 +366,7 @@ export class FireProvider extends ObservableV2<any> {
           peerUid,
           isCaller,
           encodingVersion: this.encodingVersion,
+          iceServers: this.iceServers,
         });
       });
     }
@@ -598,6 +626,7 @@ export class FireProvider extends ObservableV2<any> {
     maxWaitFirestoreTime,
     chunkThreshold,
     encodingVersion,
+    iceServers,
   }: Parameters) {
     super();
 
@@ -612,6 +641,7 @@ export class FireProvider extends ObservableV2<any> {
     if (maxWaitFirestoreTime) this.maxFirestoreWait = maxWaitFirestoreTime;
     if (chunkThreshold) this.chunkThreshold = chunkThreshold;
     if (encodingVersion) this.encodingVersion = encodingVersion;
+    if (iceServers && iceServers.length) this.iceServers = iceServers;
     this.awareness = new awarenessProtocol.Awareness(this.doc);
 
     // Initialize the provider

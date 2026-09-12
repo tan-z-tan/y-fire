@@ -13,15 +13,14 @@ import { getFirestore, doc, onSnapshot, setDoc, deleteDoc, } from "@firebase/fir
 import { ObservableV2 } from "lib0/observable";
 import SimplePeer from "simple-peer-light";
 import { Uint8ArrayToBase64, base64ToUint8Array, decryptData, encryptData, generateKey, killZombie, } from "./utils";
+export const DEFAULT_ICE_SERVERS = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+];
 export class WebRtc extends ObservableV2 {
-    constructor({ firebaseApp, ydoc, awareness, instanceConnection, documentPath, uid, peerUid, isCaller = false, encodingVersion, }) {
+    constructor({ firebaseApp, ydoc, awareness, instanceConnection, documentPath, uid, peerUid, isCaller = false, encodingVersion, iceServers, }) {
         super();
-        this.ice = {
-            iceServers: [
-                { urls: "stun:stun.l.google.com:19302" },
-                { urls: "stun:stun1.l.google.com:19302" },
-            ],
-        };
+        this.ice = { iceServers: DEFAULT_ICE_SERVERS };
         this.connection = "connecting";
         this.idleThreshold = 20000;
         this.encodingVersion = 1;
@@ -36,6 +35,10 @@ export class WebRtc extends ObservableV2 {
             this.peer.on("data", this.handleReceivingData);
             this.handshake();
             this.peer.on("connect", this.handleOnConnected);
+            // simple-peer emits "error" right before "close" when the link dies
+            // (ICE failure etc.). Surface the code so the provider can tell a
+            // definitive ICE failure apart from a zombie peer that never answered.
+            this.peer.on("error", this.handleOnError);
             this.peer.on("close", this.handleOnClose);
             this.startInitClock();
         };
@@ -160,13 +163,19 @@ export class WebRtc extends ObservableV2 {
             this.connection = "connected";
             this.sendData({ message: "Hey!", data: null });
         };
+        this.handleOnError = (error) => {
+            const code = (error && error.code) || "ERR_UNKNOWN";
+            this.closeReason = code;
+            const info = { peerUid: this.peerUid, isCaller: this.isCaller, code };
+            this.instanceConnection.emit("link-error", [info]);
+        };
         this.handleOnClose = () => {
             // this.consoleHandler("Peer disconnected");
             this.connection = "closed";
             this.instanceConnection.emit("closed", [true]);
             this.destroy();
         };
-        this.sendData = (_a) => __awaiter(this, [_a], void 0, function* ({ message, data, }) {
+        this.sendData = ({ message, data, }) => __awaiter(this, void 0, void 0, function* () {
             const msg = {};
             msg.uid = this.uid;
             if (message)
@@ -219,6 +228,8 @@ export class WebRtc extends ObservableV2 {
         this.isCaller = isCaller;
         if (encodingVersion)
             this.encodingVersion = encodingVersion;
+        if (iceServers && iceServers.length)
+            this.ice = { iceServers };
         /**
          * Let's initiate this peer. The peer
          * is NOT a caller unless specified
