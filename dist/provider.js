@@ -14,7 +14,7 @@ import { ObservableV2 } from "lib0/observable";
 import * as awarenessProtocol from "y-protocols/awareness";
 import { get as getLocal, set as setLocal, del as delLocal } from "idb-keyval";
 import { deleteInstance, initiateInstance, refreshPeers } from "./utils";
-import { WebRtc } from "./webrtc";
+import { DEFAULT_ICE_SERVERS, WebRtc } from "./webrtc";
 import { createGraph } from "./graph";
 const MAX_SIZE = 800000; // 800KB safety limit (Firestore limit is 1MB)
 /**
@@ -49,7 +49,7 @@ export class FireProvider extends ObservableV2 {
             ? Y.mergeUpdatesV2(updates)
             : Y.mergeUpdates(updates);
     }
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, encodingVersion, }) {
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, encodingVersion, iceServers, }) {
         super();
         this.timeOffset = 0; // offset to server time in mili seconds
         this.clients = [];
@@ -66,6 +66,13 @@ export class FireProvider extends ObservableV2 {
         this.maxFirestoreWait = 3000;
         this.chunkThreshold = MAX_SIZE;
         this.encodingVersion = 1;
+        this.iceServers = DEFAULT_ICE_SERVERS;
+        /**
+         * Links that died with ERR_ICE_CONNECTION_FAILURE, cumulative across
+         * reconnects. Unlike a zombie peer (which never answers), this is a
+         * definitive "signaling worked but no ICE path exists" signal.
+         */
+        this.iceFailures = 0;
         this.firebaseDataLastUpdatedAt = new Date().getTime();
         this.instanceConnection = new ObservableV2();
         this.ready = false;
@@ -74,6 +81,7 @@ export class FireProvider extends ObservableV2 {
             try {
                 const data = yield initiateInstance(this.db, this.documentPath);
                 this.instanceConnection.on("closed", this.trackConnections);
+                this.instanceConnection.on("link-error", this.handleLinkError);
                 this.uid = data.uid;
                 this.timeOffset = data.offset;
                 this.initiateHandler();
@@ -198,6 +206,23 @@ export class FireProvider extends ObservableV2 {
                 this.consoleHandler("Creating peer mesh error", error);
             });
         };
+        this.handleLinkError = (error) => {
+            if (error.code === "ERR_ICE_CONNECTION_FAILURE")
+                this.iceFailures++;
+            if (this.onLinkError)
+                this.onLinkError(error);
+        };
+        /**
+         * Replace the ICE servers used for peer links (e.g. add TURN once a
+         * STUN-only mesh has proven unreachable). Existing links keep their
+         * RTCPeerConnection config, so by default the mesh is rebuilt through
+         * reconnect(), which re-creates this instance and every link.
+         */
+        this.setIceServers = (iceServers, reconnect = true) => {
+            this.iceServers = iceServers && iceServers.length ? iceServers : DEFAULT_ICE_SERVERS;
+            if (reconnect)
+                this.reconnect();
+        };
         this.reconnect = () => {
             if (this.recreateTimeout)
                 clearTimeout(this.recreateTimeout);
@@ -261,6 +286,7 @@ export class FireProvider extends ObservableV2 {
                         peerUid,
                         isCaller,
                         encodingVersion: this.encodingVersion,
+                        iceServers: this.iceServers,
                     });
                 }));
             }
@@ -476,6 +502,8 @@ export class FireProvider extends ObservableV2 {
             this.chunkThreshold = chunkThreshold;
         if (encodingVersion)
             this.encodingVersion = encodingVersion;
+        if (iceServers && iceServers.length)
+            this.iceServers = iceServers;
         this.awareness = new awarenessProtocol.Awareness(this.doc);
         // Initialize the provider
         const init = this.init();

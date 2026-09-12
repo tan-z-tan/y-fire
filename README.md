@@ -108,6 +108,7 @@ You need to grant **read and write** permissions to the document `/path/to/your/
 - **maxUpdatesThreshold**: Number of updates before triggering real-time data share, defaults to 20
 - **maxWaitTime**: Time in milliseconds before triggering real-time data share, defaults to 100
 - **maxWaitFirestoreTime**: Time in milliseconds before triggering persistent data sync to Firestore, defaults to 3000
+- **iceServers**: `RTCIceServer[]` used for every WebRTC peer link. Defaults to public Google STUN only (`DEFAULT_ICE_SERVERS`). Pass TURN servers here when peers sit behind restrictive NATs/firewalls.
 
 Example:
 
@@ -140,12 +141,14 @@ new FireProvider({
 
 - **destroy**: Destroys the y-fire instance. You may want to destroy the y-fire instance when navigating out of the page to avoid the initialization of duplicate instances. Use `provider.destroy();` to destroy the instance.
 - ~~**destroyHandler**: Destroys the y-fire instance. You may want to destroy the y-fire instance when navigating out of the page to avoid the initialization of duplicate instances. Use `provider.destroyHandler();` to destroy the instance.~~ (Replaced with **destroy**)
+- **setIceServers(iceServers, reconnect = true)**: Replace the ICE servers for peer links at runtime (e.g. add TURN after the STUN-only mesh failed). Existing links keep their old config, so by default the mesh is rebuilt via `reconnect()` (new instance uid, new links). Pass `reconnect = false` to only affect links created later (e.g. when refreshing short-lived TURN credentials).
 
 #### Events
 
 - **onReady**: Triggered after the first connection has been established to Firestore (initial data fetch).
 - **onDeleted**: Triggered if the instance was deleted (e.g., no permission to read/write the document).
 - **onSaving**: Triggered when the sync to Firestore is in process (e.g., you may want to alert users not to close the window).
+- **onLinkError**: Triggered when a peer link dies with an error. Receives `{ peerUid, isCaller, code }` where `code` is the simple-peer error code (e.g. `ERR_ICE_CONNECTION_FAILURE`). `provider.iceFailures` counts ICE failures cumulatively across reconnects.
 
 Example:
 

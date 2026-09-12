@@ -1,9 +1,10 @@
+/// <reference types="node" />
 import { FirebaseApp } from "@firebase/app";
 import { Firestore, Bytes } from "@firebase/firestore";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 import * as awarenessProtocol from "y-protocols/awareness";
-import { WebRtc } from "./webrtc";
+import { WebRtc, type LinkError } from "./webrtc";
 export interface Parameters {
     firebaseApp: FirebaseApp;
     ydoc: Y.Doc;
@@ -14,6 +15,8 @@ export interface Parameters {
     maxWaitFirestoreTime?: number;
     chunkThreshold?: number;
     encodingVersion?: 1 | 2;
+    /** ICE servers for every peer link. Defaults to public Google STUN (no TURN). */
+    iceServers?: RTCIceServer[];
 }
 interface PeersRTC {
     receivers: {
@@ -55,6 +58,14 @@ export declare class FireProvider extends ObservableV2<any> {
     maxFirestoreWait: number;
     chunkThreshold: number;
     encodingVersion: 1 | 2;
+    iceServers: RTCIceServer[];
+    /**
+     * Links that died with ERR_ICE_CONNECTION_FAILURE, cumulative across
+     * reconnects. Unlike a zombie peer (which never answers), this is a
+     * definitive "signaling worked but no ICE path exists" signal.
+     */
+    iceFailures: number;
+    onLinkError?: (error: LinkError) => void;
     firebaseDataLastUpdatedAt: number;
     instanceConnection: ObservableV2<any>;
     recreateTimeout: string | number | NodeJS.Timeout;
@@ -75,6 +86,14 @@ export declare class FireProvider extends ObservableV2<any> {
     initiateHandler: () => void;
     trackData: () => void;
     trackMesh: () => void;
+    handleLinkError: (error: LinkError) => void;
+    /**
+     * Replace the ICE servers used for peer links (e.g. add TURN once a
+     * STUN-only mesh has proven unreachable). Existing links keep their
+     * RTCPeerConnection config, so by default the mesh is rebuilt through
+     * reconnect(), which re-creates this instance and every link.
+     */
+    setIceServers: (iceServers: RTCIceServer[], reconnect?: boolean) => void;
     reconnect: () => void;
     trackConnections: () => Promise<void>;
     connectToPeers: (newPeers: string[], oldPeers: Set<string>, isCaller: boolean) => Set<any>;
@@ -99,7 +118,7 @@ export declare class FireProvider extends ObservableV2<any> {
     consoleHandler: (message: any, data?: any) => void;
     destroy: () => void;
     kill: (keepReadOnly?: boolean) => void;
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, encodingVersion, }: Parameters);
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, encodingVersion, iceServers, }: Parameters);
 }
 export {};
 //# sourceMappingURL=provider.d.ts.map
