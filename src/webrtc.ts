@@ -21,6 +21,10 @@ import {
   encryptData,
   generateKey,
   killZombie,
+  encodeChunkFrames,
+  isChunkFrame,
+  ChunkReassembler,
+  RTC_CHUNK_SIZE,
 } from "./utils";
 
 interface Parameters {
@@ -72,6 +76,13 @@ export class WebRtc extends ObservableV2<any> {
   clock: string | number | NodeJS.Timeout;
   idleThreshold: number = 20000;
   encodingVersion: 1 | 2 = 1;
+  /** 送信は 1 本の直列キューに乗せ、チャンク列の順序と背圧待ちを守る。 */
+  private sendQueue: Promise<void> = Promise.resolve();
+  private nextMessageId = 0;
+  private reassembler = new ChunkReassembler();
+  /** これを超えて channel に溜まっていたら bufferedamountlow を待つ。 */
+  static readonly MAX_BUFFERED_AMOUNT = 1024 * 1024;
+  static readonly BUFFERED_AMOUNT_LOW = 256 * 1024;
 
   constructor({
     firebaseApp,
@@ -310,12 +321,58 @@ export class WebRtc extends ObservableV2<any> {
       msg.data = await Uint8ArrayToBase64(data);
     }
     const encrypted = await encryptData(msg, this.peerKey);
-    if (this.connection === "connected" && encrypted) this.peer.send(encrypted);
+    if (!encrypted) return;
+    this.sendQueue = this.sendQueue
+      .then(() => this.writeToChannel(encrypted))
+      .catch((error) => this.errorHandler(error));
+    await this.sendQueue;
+  };
+
+  /**
+   * RTCDataChannel の max-message-size (Chrome 256 KiB) を超えるとメッセージが
+   * 送れず例外になるので、大きいものは 16 KiB のフレームに分けて送る。
+   */
+  private writeToChannel = async (encrypted: Uint8Array) => {
+    if (this.connection !== "connected") return;
+    if (encrypted.length <= RTC_CHUNK_SIZE) {
+      this.peer.send(encrypted);
+      return;
+    }
+    const frames = encodeChunkFrames(encrypted, this.nextMessageId++);
+    for (const frame of frames) {
+      await this.waitForBufferRoom();
+      if (this.connection !== "connected") return;
+      this.peer.send(frame);
+    }
+  };
+
+  private waitForBufferRoom = (): Promise<void> => {
+    const channel: RTCDataChannel | undefined = (this.peer as any)._channel;
+    if (!channel || channel.bufferedAmount <= WebRtc.MAX_BUFFERED_AMOUNT) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const done = () => {
+        channel.removeEventListener("bufferedamountlow", done);
+        clearTimeout(timer);
+        resolve();
+      };
+      // channel が閉じても bufferedamountlow が来ないことがあるので時限で抜ける
+      const timer = setTimeout(done, 5000);
+      channel.bufferedAmountLowThreshold = WebRtc.BUFFERED_AMOUNT_LOW;
+      channel.addEventListener("bufferedamountlow", done);
+    });
   };
 
   handleReceivingData = async (data: any) => {
     try {
-      const decrypted = await decryptData(data, this.peerKey);
+      let payload: Uint8Array = data;
+      if (isChunkFrame(data)) {
+        const whole = this.reassembler.push(data);
+        if (!whole) return;
+        payload = whole;
+      }
+      const decrypted = await decryptData(payload, this.peerKey);
       if (decrypted) {
         if (decrypted.data) {
           decrypted.data = await base64ToUint8Array(decrypted.data);
@@ -358,6 +415,7 @@ export class WebRtc extends ObservableV2<any> {
   async destroy() {
     // this.consoleHandler("destroyed");
     if (this.clock) clearTimeout(this.clock);
+    this.reassembler.clear();
     if (this.peer) this.peer.destroy();
     this.unsubHandshake();
     this.deleteSignals(); // Delete calls and answers

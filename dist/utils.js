@@ -207,3 +207,76 @@ export const decryptData = (message, key) => __awaiter(void 0, void 0, void 0, f
         return null;
     }
 });
+/**
+ * RTCDataChannel の 1 メッセージ上限 (Chrome 256 KiB、環境により 64 KiB) を超える
+ * ペイロードを分割する。16 KiB は全ブラウザで確実に通るサイズ。
+ */
+export const RTC_CHUNK_SIZE = 16 * 1024;
+const CHUNK_FRAME_TAG = "y-fire/chunk";
+/**
+ * 暗号化済みメッセージをチャンクフレーム列にする。先頭の varString が "AES-GCM" 以外
+ * なので、分割を知らない旧クライアントは decryptData で捨てる (壊れない)。
+ */
+export const encodeChunkFrames = (payload, messageId, chunkSize = RTC_CHUNK_SIZE) => {
+    const count = Math.ceil(payload.length / chunkSize);
+    const frames = [];
+    for (let i = 0; i < count; i++) {
+        const encoder = encoding.createEncoder();
+        encoding.writeVarString(encoder, CHUNK_FRAME_TAG);
+        encoding.writeVarUint(encoder, messageId);
+        encoding.writeVarUint(encoder, i);
+        encoding.writeVarUint(encoder, count);
+        encoding.writeVarUint8Array(encoder, payload.subarray(i * chunkSize, (i + 1) * chunkSize));
+        frames.push(encoding.toUint8Array(encoder));
+    }
+    return frames;
+};
+export const isChunkFrame = (message) => {
+    try {
+        const decoder = decoding.createDecoder(message);
+        return decoding.readVarString(decoder) === CHUNK_FRAME_TAG;
+    }
+    catch (_a) {
+        return false;
+    }
+};
+/** 受信したチャンクフレームをメッセージ id ごとに集め、揃ったら元のペイロードを返す。 */
+export class ChunkReassembler {
+    constructor() {
+        this.partial = new Map();
+    }
+    push(frame) {
+        const decoder = decoding.createDecoder(frame);
+        if (decoding.readVarString(decoder) !== CHUNK_FRAME_TAG) {
+            throw new Error("Not a chunk frame");
+        }
+        const messageId = decoding.readVarUint(decoder);
+        const index = decoding.readVarUint(decoder);
+        const count = decoding.readVarUint(decoder);
+        const part = decoding.readVarUint8Array(decoder);
+        let entry = this.partial.get(messageId);
+        if (!entry) {
+            entry = { count, received: 0, parts: new Array(count) };
+            this.partial.set(messageId, entry);
+        }
+        if (index >= entry.count || entry.parts[index]) {
+            throw new Error(`Bad chunk index ${index}/${entry.count}`);
+        }
+        entry.parts[index] = part;
+        entry.received++;
+        if (entry.received < entry.count)
+            return null;
+        this.partial.delete(messageId);
+        const total = entry.parts.reduce((n, p) => n + p.length, 0);
+        const out = new Uint8Array(total);
+        let offset = 0;
+        for (const p of entry.parts) {
+            out.set(p, offset);
+            offset += p.length;
+        }
+        return out;
+    }
+    clear() {
+        this.partial.clear();
+    }
+}

@@ -46,6 +46,13 @@ export declare class WebRtc extends ObservableV2<any> {
     clock: string | number | NodeJS.Timeout;
     idleThreshold: number;
     encodingVersion: 1 | 2;
+    /** 送信は 1 本の直列キューに乗せ、チャンク列の順序と背圧待ちを守る。 */
+    private sendQueue;
+    private nextMessageId;
+    private reassembler;
+    /** これを超えて channel に溜まっていたら bufferedamountlow を待つ。 */
+    static readonly MAX_BUFFERED_AMOUNT: number;
+    static readonly BUFFERED_AMOUNT_LOW: number;
     constructor({ firebaseApp, ydoc, awareness, instanceConnection, documentPath, uid, peerUid, isCaller, encodingVersion, iceServers, }: Parameters);
     initPeer: () => void;
     startInitClock: () => void;
@@ -74,6 +81,12 @@ export declare class WebRtc extends ObservableV2<any> {
         message: unknown;
         data: Uint8Array | null;
     }) => Promise<void>;
+    /**
+     * RTCDataChannel の max-message-size (Chrome 256 KiB) を超えるとメッセージが
+     * 送れず例外になるので、大きいものは 16 KiB のフレームに分けて送る。
+     */
+    private writeToChannel;
+    private waitForBufferRoom;
     handleReceivingData: (data: any) => Promise<void>;
     consoleHandler: (message: any, data?: any) => void;
     errorHandler: (error: any) => void;
