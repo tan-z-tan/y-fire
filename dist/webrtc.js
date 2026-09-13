@@ -12,7 +12,7 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import { getFirestore, doc, onSnapshot, setDoc, deleteDoc, } from "@firebase/firestore";
 import { ObservableV2 } from "lib0/observable";
 import SimplePeer from "simple-peer-light";
-import { Uint8ArrayToBase64, base64ToUint8Array, decryptData, encryptData, generateKey, killZombie, } from "./utils";
+import { Uint8ArrayToBase64, base64ToUint8Array, decryptData, encryptData, generateKey, killZombie, encodeChunkFrames, isChunkFrame, ChunkReassembler, RTC_CHUNK_SIZE, } from "./utils";
 export const DEFAULT_ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
@@ -24,6 +24,10 @@ export class WebRtc extends ObservableV2 {
         this.connection = "connecting";
         this.idleThreshold = 20000;
         this.encodingVersion = 1;
+        /** 送信は 1 本の直列キューに乗せ、チャンク列の順序と背圧待ちを守る。 */
+        this.sendQueue = Promise.resolve();
+        this.nextMessageId = 0;
+        this.reassembler = new ChunkReassembler();
         this.initPeer = () => {
             this.createKey();
             if (this.isCaller) {
@@ -184,12 +188,59 @@ export class WebRtc extends ObservableV2 {
                 msg.data = yield Uint8ArrayToBase64(data);
             }
             const encrypted = yield encryptData(msg, this.peerKey);
-            if (this.connection === "connected" && encrypted)
-                this.peer.send(encrypted);
+            if (!encrypted)
+                return;
+            this.sendQueue = this.sendQueue
+                .then(() => this.writeToChannel(encrypted))
+                .catch((error) => this.errorHandler(error));
+            yield this.sendQueue;
         });
+        /**
+         * RTCDataChannel の max-message-size (Chrome 256 KiB) を超えるとメッセージが
+         * 送れず例外になるので、大きいものは 16 KiB のフレームに分けて送る。
+         */
+        this.writeToChannel = (encrypted) => __awaiter(this, void 0, void 0, function* () {
+            if (this.connection !== "connected")
+                return;
+            if (encrypted.length <= RTC_CHUNK_SIZE) {
+                this.peer.send(encrypted);
+                return;
+            }
+            const frames = encodeChunkFrames(encrypted, this.nextMessageId++);
+            for (const frame of frames) {
+                yield this.waitForBufferRoom();
+                if (this.connection !== "connected")
+                    return;
+                this.peer.send(frame);
+            }
+        });
+        this.waitForBufferRoom = () => {
+            const channel = this.peer._channel;
+            if (!channel || channel.bufferedAmount <= WebRtc.MAX_BUFFERED_AMOUNT) {
+                return Promise.resolve();
+            }
+            return new Promise((resolve) => {
+                const done = () => {
+                    channel.removeEventListener("bufferedamountlow", done);
+                    clearTimeout(timer);
+                    resolve();
+                };
+                // channel が閉じても bufferedamountlow が来ないことがあるので時限で抜ける
+                const timer = setTimeout(done, 5000);
+                channel.bufferedAmountLowThreshold = WebRtc.BUFFERED_AMOUNT_LOW;
+                channel.addEventListener("bufferedamountlow", done);
+            });
+        };
         this.handleReceivingData = (data) => __awaiter(this, void 0, void 0, function* () {
             try {
-                const decrypted = yield decryptData(data, this.peerKey);
+                let payload = data;
+                if (isChunkFrame(data)) {
+                    const whole = this.reassembler.push(data);
+                    if (!whole)
+                        return;
+                    payload = whole;
+                }
+                const decrypted = yield decryptData(payload, this.peerKey);
                 if (decrypted) {
                     if (decrypted.data) {
                         decrypted.data = yield base64ToUint8Array(decrypted.data);
@@ -245,6 +296,7 @@ export class WebRtc extends ObservableV2 {
             // this.consoleHandler("destroyed");
             if (this.clock)
                 clearTimeout(this.clock);
+            this.reassembler.clear();
             if (this.peer)
                 this.peer.destroy();
             this.unsubHandshake();
@@ -253,3 +305,6 @@ export class WebRtc extends ObservableV2 {
         });
     }
 }
+/** これを超えて channel に溜まっていたら bufferedamountlow を待つ。 */
+WebRtc.MAX_BUFFERED_AMOUNT = 1024 * 1024;
+WebRtc.BUFFERED_AMOUNT_LOW = 256 * 1024;
