@@ -13,6 +13,7 @@ import { getFirestore, doc, onSnapshot, setDoc, deleteDoc, } from "@firebase/fir
 import { ObservableV2 } from "lib0/observable";
 import SimplePeer from "simple-peer-light";
 import { Uint8ArrayToBase64, base64ToUint8Array, decryptData, encryptData, generateKey, killZombie, encodeChunkFrames, isChunkFrame, ChunkReassembler, RTC_CHUNK_SIZE, } from "./utils";
+import { encodeSyncStep1, handleSyncMessage, hasPendingStructs } from "./sync";
 export const DEFAULT_ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
@@ -28,6 +29,8 @@ export class WebRtc extends ObservableV2 {
         this.sendQueue = Promise.resolve();
         this.nextMessageId = 0;
         this.reassembler = new ChunkReassembler();
+        this.lastPendingResyncAt = 0;
+        this.pendingResyncGap = WebRtc.PENDING_RESYNC_MIN_GAP_MS;
         this.initPeer = () => {
             this.createKey();
             if (this.isCaller) {
@@ -166,6 +169,31 @@ export class WebRtc extends ObservableV2 {
             // this.consoleHandler("Peer connected");
             this.connection = "connected";
             this.sendData({ message: "Hey!", data: null });
+            // Anything sent while this link was down was dropped; reconcile now.
+            this.sendSyncStep1();
+            if (this.resyncTimer)
+                clearInterval(this.resyncTimer);
+            this.resyncTimer = setInterval(this.sendSyncStep1, WebRtc.RESYNC_INTERVAL_MS);
+        };
+        this.sendSyncStep1 = () => {
+            if (this.connection !== "connected")
+                return;
+            this.sendData({ message: "sync", data: encodeSyncStep1(this.doc) });
+        };
+        /** A received update is waiting on one we never got: ask this peer for it. */
+        this.resyncIfPending = () => {
+            if (!hasPendingStructs(this.doc)) {
+                this.pendingResyncGap = WebRtc.PENDING_RESYNC_MIN_GAP_MS;
+                return;
+            }
+            const now = Date.now();
+            if (now - this.lastPendingResyncAt < this.pendingResyncGap)
+                return;
+            if (this.lastPendingResyncAt > 0) {
+                this.pendingResyncGap = Math.min(this.pendingResyncGap * 2, WebRtc.RESYNC_INTERVAL_MS);
+            }
+            this.lastPendingResyncAt = now;
+            this.sendSyncStep1();
         };
         this.handleOnError = (error) => {
             const code = (error && error.code) || "ERR_UNKNOWN";
@@ -248,6 +276,12 @@ export class WebRtc extends ObservableV2 {
                     if (decrypted.message === "awareness" && decrypted.data) {
                         awarenessProtocol.applyAwarenessUpdate(this.awareness, decrypted.data, decrypted.uid);
                     }
+                    else if (decrypted.message === "sync" && decrypted.data) {
+                        const reply = handleSyncMessage(this.doc, decrypted.data, decrypted.uid);
+                        if (reply)
+                            this.sendData({ message: "sync", data: reply });
+                        this.resyncIfPending();
+                    }
                     else if (!decrypted.message && decrypted.data) {
                         // this.consoleHandler("decrypted data", decrypted);
                         if (this.encodingVersion === 2) {
@@ -256,6 +290,7 @@ export class WebRtc extends ObservableV2 {
                         else {
                             Y.applyUpdate(this.doc, decrypted.data, decrypted.uid);
                         }
+                        this.resyncIfPending();
                     }
                 }
             }
@@ -296,6 +331,8 @@ export class WebRtc extends ObservableV2 {
             // this.consoleHandler("destroyed");
             if (this.clock)
                 clearTimeout(this.clock);
+            if (this.resyncTimer)
+                clearInterval(this.resyncTimer);
             this.reassembler.clear();
             if (this.peer)
                 this.peer.destroy();
@@ -308,3 +345,11 @@ export class WebRtc extends ObservableV2 {
 /** これを超えて channel に溜まっていたら bufferedamountlow を待つ。 */
 WebRtc.MAX_BUFFERED_AMOUNT = 1024 * 1024;
 WebRtc.BUFFERED_AMOUNT_LOW = 256 * 1024;
+/** Periodic state-vector exchange, catching gaps no reconnect revealed. */
+WebRtc.RESYNC_INTERVAL_MS = 30000;
+/**
+ * Gap between pending-triggered resyncs. Doubles (up to the periodic
+ * interval) while the gap persists, since a gap no peer can fill would
+ * otherwise re-request on every incoming update.
+ */
+WebRtc.PENDING_RESYNC_MIN_GAP_MS = 2000;

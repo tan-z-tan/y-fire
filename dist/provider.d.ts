@@ -13,6 +13,11 @@ export interface Parameters {
     maxUpdatesThreshold?: number;
     maxWaitTime?: number;
     maxWaitFirestoreTime?: number;
+    /**
+     * Upper bound (ms) on how long a save may keep yielding to peers that
+     * saved recently. Defaults to 4x maxWaitFirestoreTime.
+     */
+    maxFirestoreDeferral?: number;
     chunkThreshold?: number;
     encodingVersion?: 1 | 2;
     /** ICE servers for every peer link. Defaults to public Google STUN (no TURN). */
@@ -56,6 +61,9 @@ export declare class FireProvider extends ObservableV2<any> {
     maxRTCWait: number;
     firestoreTimeout: string | number | NodeJS.Timeout;
     maxFirestoreWait: number;
+    maxFirestoreDeferral?: number;
+    /** When the oldest unsaved local change was queued; null when nothing is queued. */
+    firestoreQueuedSince: number | null;
     chunkThreshold: number;
     encodingVersion: 1 | 2;
     iceServers: RTCIceServer[];
@@ -94,6 +102,8 @@ export declare class FireProvider extends ObservableV2<any> {
      * reconnect(), which re-creates this instance and every link.
      */
     setIceServers: (iceServers: RTCIceServer[], reconnect?: boolean) => void;
+    /** Ask every connected peer to reconcile state vectors with us. */
+    requestResync: () => void;
     reconnect: () => void;
     trackConnections: () => Promise<void>;
     connectToPeers: (newPeers: string[], oldPeers: Set<string>, isCaller: boolean) => Set<any>;
@@ -118,7 +128,7 @@ export declare class FireProvider extends ObservableV2<any> {
     consoleHandler: (message: any, data?: any) => void;
     destroy: () => void;
     kill: (keepReadOnly?: boolean) => void;
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, encodingVersion, iceServers, }: Parameters);
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, maxFirestoreDeferral, chunkThreshold, encodingVersion, iceServers, }: Parameters);
 }
 export {};
 //# sourceMappingURL=provider.d.ts.map

@@ -18,6 +18,7 @@ import { get as getLocal, set as setLocal, del as delLocal } from "idb-keyval";
 import { deleteInstance, initiateInstance, refreshPeers } from "./utils";
 import { DEFAULT_ICE_SERVERS, WebRtc, type LinkError } from "./webrtc";
 import { createGraph } from "./graph";
+import { hasPendingStructs } from "./sync";
 
 export interface Parameters {
   firebaseApp: FirebaseApp;
@@ -27,6 +28,11 @@ export interface Parameters {
   maxUpdatesThreshold?: number;
   maxWaitTime?: number;
   maxWaitFirestoreTime?: number;
+  /**
+   * Upper bound (ms) on how long a save may keep yielding to peers that
+   * saved recently. Defaults to 4x maxWaitFirestoreTime.
+   */
+  maxFirestoreDeferral?: number;
   chunkThreshold?: number;
   encodingVersion?: 1 | 2;
   /** ICE servers for every peer link. Defaults to public Google STUN (no TURN). */
@@ -81,6 +87,9 @@ export class FireProvider extends ObservableV2<any> {
   maxRTCWait: number = 100;
   firestoreTimeout: string | number | NodeJS.Timeout;
   maxFirestoreWait: number = 3000;
+  maxFirestoreDeferral?: number;
+  /** When the oldest unsaved local change was queued; null when nothing is queued. */
+  firestoreQueuedSince: number | null = null;
   chunkThreshold: number = MAX_SIZE;
   encodingVersion: 1 | 2 = 1;
   iceServers: RTCIceServer[] = DEFAULT_ICE_SERVERS;
@@ -233,6 +242,9 @@ export class FireProvider extends ObservableV2<any> {
             if (content) {
               const origin = "origin:firebase/update"; // make sure this does not coincide with UID
               this._applyUpdate(content, origin);
+              // The saved state can itself carry a gap (a saver that missed an
+              // update); peers may still hold the missing piece.
+              if (hasPendingStructs(this.doc)) this.requestResync();
             }
           }
           if (!this.ready) {
@@ -300,6 +312,15 @@ export class FireProvider extends ObservableV2<any> {
   setIceServers = (iceServers: RTCIceServer[], reconnect: boolean = true) => {
     this.iceServers = iceServers && iceServers.length ? iceServers : DEFAULT_ICE_SERVERS;
     if (reconnect) this.reconnect();
+  };
+
+  /** Ask every connected peer to reconcile state vectors with us. */
+  requestResync = () => {
+    const links = [
+      ...Object.values(this.peersRTC.receivers ?? {}),
+      ...Object.values(this.peersRTC.senders ?? {}),
+    ];
+    links.forEach((link) => link.sendSyncStep1());
   };
 
   reconnect = () => {
@@ -403,6 +424,8 @@ export class FireProvider extends ObservableV2<any> {
   };
 
   saveToFirestore = async () => {
+    // This save captures every change queued so far (the state is encoded below).
+    this.firestoreQueuedSince = null;
     try {
       // current document to firestore
       const ref = doc(this.db, this.documentPath);
@@ -464,10 +487,16 @@ export class FireProvider extends ObservableV2<any> {
     // if cache settles down, save document to firebase
     if (this.firestoreTimeout) clearTimeout(this.firestoreTimeout); // kill other save processes first
     if (this.onSaving) this.onSaving(true);
+    if (this.firestoreQueuedSince === null) this.firestoreQueuedSince = Date.now();
     this.firestoreTimeout = setTimeout(() => {
+      const now = Date.now();
+      // With several active editors someone saves every few seconds, so
+      // yielding alone can starve this client's save until the tab closes,
+      // taking its updates with it.
+      const deferral = this.maxFirestoreDeferral ?? this.maxFirestoreWait * 4;
       if (
-        new Date().getTime() - this.firebaseDataLastUpdatedAt >
-        this.maxFirestoreWait
+        now - this.firebaseDataLastUpdatedAt > this.maxFirestoreWait ||
+        now - (this.firestoreQueuedSince ?? now) >= deferral
       ) {
         this.saveToFirestore();
       } else {
@@ -624,6 +653,7 @@ export class FireProvider extends ObservableV2<any> {
     maxUpdatesThreshold,
     maxWaitTime,
     maxWaitFirestoreTime,
+    maxFirestoreDeferral,
     chunkThreshold,
     encodingVersion,
     iceServers,
@@ -639,6 +669,7 @@ export class FireProvider extends ObservableV2<any> {
     if (maxUpdatesThreshold) this.maxCacheUpdates = maxUpdatesThreshold;
     if (maxWaitTime) this.maxRTCWait = maxWaitTime;
     if (maxWaitFirestoreTime) this.maxFirestoreWait = maxWaitFirestoreTime;
+    if (maxFirestoreDeferral) this.maxFirestoreDeferral = maxFirestoreDeferral;
     if (chunkThreshold) this.chunkThreshold = chunkThreshold;
     if (encodingVersion) this.encodingVersion = encodingVersion;
     if (iceServers && iceServers.length) this.iceServers = iceServers;

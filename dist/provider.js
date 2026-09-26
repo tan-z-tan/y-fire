@@ -16,6 +16,7 @@ import { get as getLocal, set as setLocal, del as delLocal } from "idb-keyval";
 import { deleteInstance, initiateInstance, refreshPeers } from "./utils";
 import { DEFAULT_ICE_SERVERS, WebRtc } from "./webrtc";
 import { createGraph } from "./graph";
+import { hasPendingStructs } from "./sync";
 const MAX_SIZE = 800000; // 800KB safety limit (Firestore limit is 1MB)
 /**
  * FireProvider class that handles firestore data sync and awareness
@@ -49,7 +50,7 @@ export class FireProvider extends ObservableV2 {
             ? Y.mergeUpdatesV2(updates)
             : Y.mergeUpdates(updates);
     }
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, chunkThreshold, encodingVersion, iceServers, }) {
+    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, maxFirestoreDeferral, chunkThreshold, encodingVersion, iceServers, }) {
         super();
         this.timeOffset = 0; // offset to server time in mili seconds
         this.clients = [];
@@ -64,6 +65,8 @@ export class FireProvider extends ObservableV2 {
         this.cacheUpdateCount = 0;
         this.maxRTCWait = 100;
         this.maxFirestoreWait = 3000;
+        /** When the oldest unsaved local change was queued; null when nothing is queued. */
+        this.firestoreQueuedSince = null;
         this.chunkThreshold = MAX_SIZE;
         this.encodingVersion = 1;
         this.iceServers = DEFAULT_ICE_SERVERS;
@@ -171,6 +174,10 @@ export class FireProvider extends ObservableV2 {
                         if (content) {
                             const origin = "origin:firebase/update"; // make sure this does not coincide with UID
                             this._applyUpdate(content, origin);
+                            // The saved state can itself carry a gap (a saver that missed an
+                            // update); peers may still hold the missing piece.
+                            if (hasPendingStructs(this.doc))
+                                this.requestResync();
                         }
                     }
                     if (!this.ready) {
@@ -222,6 +229,15 @@ export class FireProvider extends ObservableV2 {
             this.iceServers = iceServers && iceServers.length ? iceServers : DEFAULT_ICE_SERVERS;
             if (reconnect)
                 this.reconnect();
+        };
+        /** Ask every connected peer to reconcile state vectors with us. */
+        this.requestResync = () => {
+            var _a, _b;
+            const links = [
+                ...Object.values((_a = this.peersRTC.receivers) !== null && _a !== void 0 ? _a : {}),
+                ...Object.values((_b = this.peersRTC.senders) !== null && _b !== void 0 ? _b : {}),
+            ];
+            links.forEach((link) => link.sendSyncStep1());
         };
         this.reconnect = () => {
             if (this.recreateTimeout)
@@ -313,6 +329,8 @@ export class FireProvider extends ObservableV2 {
             }
         };
         this.saveToFirestore = () => __awaiter(this, void 0, void 0, function* () {
+            // This save captures every change queued so far (the state is encoded below).
+            this.firestoreQueuedSince = null;
             try {
                 // current document to firestore
                 const ref = doc(this.db, this.documentPath);
@@ -362,9 +380,17 @@ export class FireProvider extends ObservableV2 {
                 clearTimeout(this.firestoreTimeout); // kill other save processes first
             if (this.onSaving)
                 this.onSaving(true);
+            if (this.firestoreQueuedSince === null)
+                this.firestoreQueuedSince = Date.now();
             this.firestoreTimeout = setTimeout(() => {
-                if (new Date().getTime() - this.firebaseDataLastUpdatedAt >
-                    this.maxFirestoreWait) {
+                var _a, _b;
+                const now = Date.now();
+                // With several active editors someone saves every few seconds, so
+                // yielding alone can starve this client's save until the tab closes,
+                // taking its updates with it.
+                const deferral = (_a = this.maxFirestoreDeferral) !== null && _a !== void 0 ? _a : this.maxFirestoreWait * 4;
+                if (now - this.firebaseDataLastUpdatedAt > this.maxFirestoreWait ||
+                    now - ((_b = this.firestoreQueuedSince) !== null && _b !== void 0 ? _b : now) >= deferral) {
                     this.saveToFirestore();
                 }
                 else {
@@ -498,6 +524,8 @@ export class FireProvider extends ObservableV2 {
             this.maxRTCWait = maxWaitTime;
         if (maxWaitFirestoreTime)
             this.maxFirestoreWait = maxWaitFirestoreTime;
+        if (maxFirestoreDeferral)
+            this.maxFirestoreDeferral = maxFirestoreDeferral;
         if (chunkThreshold)
             this.chunkThreshold = chunkThreshold;
         if (encodingVersion)
