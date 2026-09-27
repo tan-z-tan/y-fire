@@ -53,6 +53,17 @@ export declare class WebRtc extends ObservableV2<any> {
     /** これを超えて channel に溜まっていたら bufferedamountlow を待つ。 */
     static readonly MAX_BUFFERED_AMOUNT: number;
     static readonly BUFFERED_AMOUNT_LOW: number;
+    /** Periodic state-vector exchange, catching gaps no reconnect revealed. */
+    static readonly RESYNC_INTERVAL_MS = 30000;
+    /**
+     * Gap between pending-triggered resyncs. Doubles (up to the periodic
+     * interval) while the gap persists, since a gap no peer can fill would
+     * otherwise re-request on every incoming update.
+     */
+    static readonly PENDING_RESYNC_MIN_GAP_MS = 2000;
+    private resyncTimer?;
+    private lastPendingResyncAt;
+    private pendingResyncGap;
     constructor({ firebaseApp, ydoc, awareness, instanceConnection, documentPath, uid, peerUid, isCaller, encodingVersion, iceServers, }: Parameters);
     initPeer: () => void;
     startInitClock: () => void;
@@ -72,6 +83,9 @@ export declare class WebRtc extends ObservableV2<any> {
     connect: (signal: SimplePeer.SignalData) => void;
     deleteSignals: () => void;
     handleOnConnected: () => void;
+    sendSyncStep1: () => void;
+    /** A received update is waiting on one we never got: ask this peer for it. */
+    private resyncIfPending;
     handleOnError: (error: {
         code?: string;
         message?: string;
