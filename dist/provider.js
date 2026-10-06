@@ -143,33 +143,18 @@ export class FireProvider extends ObservableV2 {
                     if (data) {
                         this.firebaseDataLastUpdatedAt = new Date().getTime();
                         let content;
-                        // Default Firestore behavior
-                        if (data.chunked) {
-                            // Handle chunked data
+                        // A chunked save always writes content: null, so inline content is
+                        // newer than any chunks (older clients never reset `chunked`).
+                        if (data.content) {
+                            content = data.content.toUint8Array();
+                        }
+                        else if (data.chunked) {
                             try {
-                                const chunksCollectionRef = collection(this.db, this.documentPath, "yfire_chunks");
-                                const chunksSnapshot = yield getDocs(chunksCollectionRef);
-                                const chunks = chunksSnapshot.docs
-                                    .map((doc) => ({
-                                    index: parseInt(doc.id),
-                                    content: doc.data().content.toUint8Array(),
-                                }))
-                                    .sort((a, b) => a.index - b.index);
-                                // Concatenate chunks
-                                const totalLength = chunks.reduce((acc, chunk) => acc + chunk.content.length, 0);
-                                content = new Uint8Array(totalLength);
-                                let offset = 0;
-                                for (const chunk of chunks) {
-                                    content.set(chunk.content, offset);
-                                    offset += chunk.content.length;
-                                }
+                                content = yield this.readChunks(data.chunkCount);
                             }
                             catch (error) {
                                 this.consoleHandler("Error fetching chunks", error);
                             }
-                        }
-                        else if (data.content) {
-                            content = data.content.toUint8Array();
                         }
                         if (content) {
                             const origin = "origin:firebase/update"; // make sure this does not coincide with UID
@@ -328,6 +313,32 @@ export class FireProvider extends ObservableV2 {
                 }
             }
         };
+        this.readChunks = (chunkCount) => __awaiter(this, void 0, void 0, function* () {
+            if (typeof chunkCount !== "number" || !Number.isInteger(chunkCount) || chunkCount < 1) {
+                throw new Error(`Invalid chunkCount: ${chunkCount}`);
+            }
+            const chunksCollectionRef = collection(this.db, this.documentPath, "yfire_chunks");
+            const chunksSnapshot = yield getDocs(chunksCollectionRef);
+            // Chunks beyond chunkCount are left over from an earlier, larger save.
+            const chunks = chunksSnapshot.docs
+                .map((doc) => ({
+                index: parseInt(doc.id),
+                content: doc.data().content.toUint8Array(),
+            }))
+                .filter((chunk) => chunk.index >= 0 && chunk.index < chunkCount)
+                .sort((a, b) => a.index - b.index);
+            if (chunks.length !== chunkCount) {
+                throw new Error(`Expected ${chunkCount} chunks, found ${chunks.length}`);
+            }
+            const totalLength = chunks.reduce((acc, chunk) => acc + chunk.content.length, 0);
+            const content = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                content.set(chunk.content, offset);
+                offset += chunk.content.length;
+            }
+            return content;
+        });
         this.saveToFirestore = () => __awaiter(this, void 0, void 0, function* () {
             // This save captures every change queued so far (the state is encoded below).
             this.firestoreQueuedSince = null;
@@ -362,7 +373,9 @@ export class FireProvider extends ObservableV2 {
                 }
                 else {
                     // No chunking needed
-                    yield setDoc(ref, this.documentMapper(Bytes.fromUint8Array(content)), { merge: true });
+                    // Stale chunks are left in place; the loader ignores them once
+                    // inline content is present.
+                    yield setDoc(ref, Object.assign(Object.assign({}, this.documentMapper(Bytes.fromUint8Array(content))), { chunked: false }), { merge: true });
                 }
                 this.deleteLocal(); // We have successfully saved to Firestore, empty indexedDb for now
             }

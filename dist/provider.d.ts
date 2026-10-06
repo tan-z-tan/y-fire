@@ -112,6 +112,7 @@ export declare class FireProvider extends ObservableV2<any> {
         message: unknown;
         data: Uint8Array | null;
     }) => void;
+    readChunks: (chunkCount: unknown) => Promise<Uint8Array>;
     saveToFirestore: () => Promise<void>;
     sendToFirestoreQueue: () => void;
     sendCache: (from: string) => void;

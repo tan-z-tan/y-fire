@@ -204,39 +204,16 @@ export class FireProvider extends ObservableV2<any> {
             this.firebaseDataLastUpdatedAt = new Date().getTime();
             let content: Uint8Array | undefined;
 
-            // Default Firestore behavior
-            if (data.chunked) {
-              // Handle chunked data
+            // A chunked save always writes content: null, so inline content is
+            // newer than any chunks (older clients never reset `chunked`).
+            if (data.content) {
+              content = data.content.toUint8Array();
+            } else if (data.chunked) {
               try {
-                const chunksCollectionRef = collection(
-                  this.db,
-                  this.documentPath,
-                  "yfire_chunks"
-                );
-                const chunksSnapshot = await getDocs(chunksCollectionRef);
-                const chunks = chunksSnapshot.docs
-                  .map((doc) => ({
-                    index: parseInt(doc.id),
-                    content: doc.data().content.toUint8Array(),
-                  }))
-                  .sort((a, b) => a.index - b.index);
-
-                // Concatenate chunks
-                const totalLength = chunks.reduce(
-                  (acc, chunk) => acc + chunk.content.length,
-                  0
-                );
-                content = new Uint8Array(totalLength);
-                let offset = 0;
-                for (const chunk of chunks) {
-                  content.set(chunk.content, offset);
-                  offset += chunk.content.length;
-                }
+                content = await this.readChunks(data.chunkCount);
               } catch (error) {
                 this.consoleHandler("Error fetching chunks", error);
               }
-            } else if (data.content) {
-              content = data.content.toUint8Array();
             }
 
             if (content) {
@@ -423,6 +400,41 @@ export class FireProvider extends ObservableV2<any> {
     }
   };
 
+  readChunks = async (chunkCount: unknown): Promise<Uint8Array> => {
+    if (typeof chunkCount !== "number" || !Number.isInteger(chunkCount) || chunkCount < 1) {
+      throw new Error(`Invalid chunkCount: ${chunkCount}`);
+    }
+    const chunksCollectionRef = collection(
+      this.db,
+      this.documentPath,
+      "yfire_chunks"
+    );
+    const chunksSnapshot = await getDocs(chunksCollectionRef);
+    // Chunks beyond chunkCount are left over from an earlier, larger save.
+    const chunks = chunksSnapshot.docs
+      .map((doc) => ({
+        index: parseInt(doc.id),
+        content: doc.data().content.toUint8Array() as Uint8Array,
+      }))
+      .filter((chunk) => chunk.index >= 0 && chunk.index < chunkCount)
+      .sort((a, b) => a.index - b.index);
+    if (chunks.length !== chunkCount) {
+      throw new Error(`Expected ${chunkCount} chunks, found ${chunks.length}`);
+    }
+
+    const totalLength = chunks.reduce(
+      (acc, chunk) => acc + chunk.content.length,
+      0
+    );
+    const content = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      content.set(chunk.content, offset);
+      offset += chunk.content.length;
+    }
+    return content;
+  };
+
   saveToFirestore = async () => {
     // This save captures every change queued so far (the state is encoded below).
     this.firestoreQueuedSince = null;
@@ -469,9 +481,11 @@ export class FireProvider extends ObservableV2<any> {
         );
       } else {
         // No chunking needed
+        // Stale chunks are left in place; the loader ignores them once
+        // inline content is present.
         await setDoc(
           ref,
-          this.documentMapper(Bytes.fromUint8Array(content)),
+          { ...this.documentMapper(Bytes.fromUint8Array(content)), chunked: false },
           { merge: true }
         );
       }
