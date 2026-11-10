@@ -7,7 +7,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-import { getFirestore, onSnapshot, doc, setDoc, getDocs, Bytes, serverTimestamp, } from "@firebase/firestore";
+import { getFirestore, onSnapshot, doc, setDoc, Bytes, serverTimestamp, writeBatch, runTransaction, } from "@firebase/firestore";
 import { collection } from "firebase/firestore";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
@@ -18,6 +18,8 @@ import { DEFAULT_ICE_SERVERS, WebRtc } from "./webrtc";
 import { createGraph } from "./graph";
 import { hasPendingStructs } from "./sync";
 const MAX_SIZE = 800000; // 800KB safety limit (Firestore limit is 1MB)
+// A Firestore commit request is capped at 10 MiB; leave room for field names and the main doc.
+const MAX_ATOMIC_SAVE_BYTES = 9.5 * 1024 * 1024;
 /**
  * FireProvider class that handles firestore data sync and awareness
  * based on webRTC.
@@ -150,7 +152,7 @@ export class FireProvider extends ObservableV2 {
                         }
                         else if (data.chunked) {
                             try {
-                                content = yield this.readChunks(data.chunkCount);
+                                content = yield this.readChunks();
                             }
                             catch (error) {
                                 this.consoleHandler("Error fetching chunks", error);
@@ -313,31 +315,42 @@ export class FireProvider extends ObservableV2 {
                 }
             }
         };
-        this.readChunks = (chunkCount) => __awaiter(this, void 0, void 0, function* () {
-            if (typeof chunkCount !== "number" || !Number.isInteger(chunkCount) || chunkCount < 1) {
-                throw new Error(`Invalid chunkCount: ${chunkCount}`);
-            }
+        // Reads main and its chunks in one transaction so they come from the same save;
+        // a save landing between the snapshot and a separate chunk query mixes generations.
+        this.readChunks = () => __awaiter(this, void 0, void 0, function* () {
+            const mainRef = doc(this.db, this.documentPath);
             const chunksCollectionRef = collection(this.db, this.documentPath, "yfire_chunks");
-            const chunksSnapshot = yield getDocs(chunksCollectionRef);
-            // Chunks beyond chunkCount are left over from an earlier, larger save.
-            const chunks = chunksSnapshot.docs
-                .map((doc) => ({
-                index: parseInt(doc.id),
-                content: doc.data().content.toUint8Array(),
-            }))
-                .filter((chunk) => chunk.index >= 0 && chunk.index < chunkCount)
-                .sort((a, b) => a.index - b.index);
-            if (chunks.length !== chunkCount) {
-                throw new Error(`Expected ${chunkCount} chunks, found ${chunks.length}`);
-            }
-            const totalLength = chunks.reduce((acc, chunk) => acc + chunk.content.length, 0);
-            const content = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-                content.set(chunk.content, offset);
-                offset += chunk.content.length;
-            }
-            return content;
+            return runTransaction(this.db, (tx) => __awaiter(this, void 0, void 0, function* () {
+                const main = yield tx.get(mainRef);
+                const data = main.data();
+                if (!data)
+                    return undefined;
+                if (data.content)
+                    return data.content.toUint8Array();
+                if (!data.chunked)
+                    return undefined;
+                const chunkCount = data.chunkCount;
+                if (typeof chunkCount !== "number" || !Number.isInteger(chunkCount) || chunkCount < 1) {
+                    throw new Error(`Invalid chunkCount: ${chunkCount}`);
+                }
+                // Chunks beyond chunkCount are left over from an earlier, larger save.
+                const chunkSnaps = yield Promise.all(Array.from({ length: chunkCount }, (_, i) => tx.get(doc(chunksCollectionRef, i.toString()))));
+                const chunks = chunkSnaps.map((snap, i) => {
+                    var _a;
+                    const chunkContent = (_a = snap.data()) === null || _a === void 0 ? void 0 : _a.content;
+                    if (!chunkContent)
+                        throw new Error(`Missing chunk ${i} of ${chunkCount}`);
+                    return chunkContent.toUint8Array();
+                });
+                const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+                const content = new Uint8Array(totalLength);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    content.set(chunk, offset);
+                    offset += chunk.length;
+                }
+                return content;
+            }));
         });
         this.saveToFirestore = () => __awaiter(this, void 0, void 0, function* () {
             // This save captures every change queued so far (the state is encoded below).
@@ -350,26 +363,27 @@ export class FireProvider extends ObservableV2 {
                     // Chunking required
                     const chunkCount = Math.ceil(content.length / this.chunkThreshold);
                     const chunksCollectionRef = collection(this.db, this.documentPath, "yfire_chunks");
-                    // Write chunks
-                    const promises = [];
+                    // Chunks and main go in one batch: written separately, concurrent saves
+                    // interleave and leave chunks from different saves that no longer decode.
+                    if (content.length > MAX_ATOMIC_SAVE_BYTES) {
+                        throw new Error(`State of ${content.length} bytes exceeds the ${MAX_ATOMIC_SAVE_BYTES} bytes a single Firestore commit can carry`);
+                    }
+                    const batch = writeBatch(this.db);
                     for (let i = 0; i < chunkCount; i++) {
                         const start = i * this.chunkThreshold;
                         const end = start + this.chunkThreshold;
-                        const chunk = content.slice(start, end);
-                        const chunkRef = doc(chunksCollectionRef, i.toString());
-                        promises.push(setDoc(chunkRef, {
-                            content: Bytes.fromUint8Array(chunk),
+                        batch.set(doc(chunksCollectionRef, i.toString()), {
+                            content: Bytes.fromUint8Array(content.slice(start, end)),
                             index: i,
-                        }));
+                        });
                     }
-                    yield Promise.all(promises);
-                    // Update main document
-                    yield setDoc(ref, {
+                    batch.set(ref, {
                         chunked: true,
                         chunkCount: chunkCount,
                         updatedAt: serverTimestamp(),
                         content: null, // Clear main content
                     }, { merge: true });
+                    yield batch.commit();
                 }
                 else {
                     // No chunking needed
